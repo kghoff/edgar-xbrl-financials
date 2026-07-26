@@ -31,7 +31,7 @@ npx edgar-xbrl-financials AAPL --provenance
 ```
 Revenues                                 416,161  ↳ RevenueFromContractWithCustomerExcludingAssessedTax [Layer 1]
 Net Income Loss                          112,010  ↳ NetIncomeLoss [Layer 1]
-Free Cash Flow                            97,280  ↳ operating_cash_flow − capex [derived]
+Free Cash Flow                            98,767  ↳ operating_cash_flow - |capital_expenditures| [derived]
 ```
 
 Other flags: `--quarterly` (recent quarters instead of years), `--json` (full

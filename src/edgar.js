@@ -1,10 +1,6 @@
-// SEC EDGAR — single source of truth for financial data, company details, and ticker search.
-// Free, no API key needed. Requires User-Agent header.
-// Rate limit: 10 requests/second.
-//
-// Browser can't set User-Agent (forbidden header), so all SEC requests
-// go through Vite proxy in dev. In Tauri production, native webview
-// doesn't enforce CORS and can set arbitrary headers.
+// SEC EDGAR — financial data, company details, and ticker search.
+// Free, no API key needed. SEC requires a User-Agent header, which is
+// attached automatically by secClient.js. Rate limit: 10 requests/second.
 
 import { cacheGet, cacheGetAsync, cacheSet } from './cache.js';
 import { formatCompanyName } from './formatCompanyName.js';
@@ -14,7 +10,7 @@ const FILINGS_CACHE_VERSION = 'v2';
 
 // ─── SEC URL helpers ────────────────────────────────────────
 
-// Dev: Vite proxy. Production: Cloudflare Worker proxy.
+// URLs point directly at SEC (via secClient's secBase/edgarBase).
 
 function secTickerMapUrl() {
   return `${secBase()}/files/company_tickers.json`;
@@ -161,7 +157,7 @@ export async function fetchCompanyInfo(ticker) {
 
   const info = {
     ticker: ticker.toUpperCase(),
-    name: data.name || '',
+    name: data.name ? formatCompanyName(data.name) : '',
     sic: data.sic || '',
     sicDescription: data.sicDescription || '',
     exchange: data.exchanges?.[0] || '',

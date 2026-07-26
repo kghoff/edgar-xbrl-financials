@@ -13,10 +13,8 @@ import { cacheGetAsync, cacheSet } from './cache.js';
 async function fetchSplits() { return []; }
 function cumulativeSplitFactor() { return 1; }
 // Layer 2/3 disconnected — kept dormant, not deleted
-// import { augmentTaxonomy } from './taxonomyResolver';
 import { classifyIndustryType } from './industryClassifier.js';
 import { getOverlay } from './industryOverlays.js';
-// import { collectKnownTags, getLayer3Suggestions } from './companyAdapter';
 
 // ─── XBRL Taxonomy Map ──────────────────────────────────────
 // Each field: { tags: [...fallback order], unit: 'USD' | 'USD/shares' | 'shares' }
