@@ -82,7 +82,16 @@ async function main() {
     process.exit(1);
   }
 
-  const data = await getFinancials(ticker);
+  // The engine emits diagnostic progress via console.log; route those to stderr
+  // during the fetch so stdout stays clean (important for `--json` piping).
+  const originalLog = console.log;
+  console.log = (...a) => console.error(...a);
+  let data;
+  try {
+    data = await getFinancials(ticker);
+  } finally {
+    console.log = originalLog;
+  }
 
   if (json) {
     console.log(JSON.stringify(data, null, 2));
