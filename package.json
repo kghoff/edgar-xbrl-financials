@@ -1,0 +1,21 @@
+{
+  "name": "edgar-xbrl-financials",
+  "version": "1.0.0",
+  "description": "Ticker to normalized financial statements, straight from SEC EDGAR XBRL. Zero dependencies.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Kyle Hoff",
+  "homepage": "https://github.com/kghoff/edgar-xbrl-financials",
+  "repository": { "type": "git", "url": "https://github.com/kghoff/edgar-xbrl-financials.git" },
+  "engines": { "node": ">=20" },
+  "main": "src/index.js",
+  "exports": { ".": "./src/index.js" },
+  "bin": { "edgar-xbrl-financials": "bin/cli.js" },
+  "files": ["src", "bin", "README.md", "LICENSE"],
+  "scripts": {
+    "test": "vitest run",
+    "test:unit": "vitest run test/unit",
+    "test:live": "vitest run test/live"
+  },
+  "devDependencies": { "vitest": "^4.1.0" }
+}
