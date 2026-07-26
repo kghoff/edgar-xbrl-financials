@@ -7,7 +7,10 @@
 
 function userAgent() {
   return process.env.SEC_USER_AGENT
-    || 'edgar-xbrl-financials/1.0 (+https://github.com/kghoff/edgar-xbrl-financials)';
+    // NOTE: do not put "github" (any case) in this string. SEC's Akamai edge
+    // silently 403s any User-Agent containing that substring, confirmed by
+    // manual curl testing on 2026-07-26 — unrelated to header presence/format.
+    || 'edgar-xbrl-financials/1.0 (+https://www.npmjs.com/package/edgar-xbrl-financials)';
 }
 
 const SEC_HOSTS = new Set(['www.sec.gov', 'data.sec.gov', 'sec.gov']);
