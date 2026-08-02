@@ -87,6 +87,12 @@ The underlying tag map was validated against a 50-company Morningstar truth set
 at **94.8%** field-level agreement (the truth-set data itself is licensed and is
 not redistributed here).
 
+## Acknowledgments
+
+Built with [Claude Code](https://claude.com/claude-code) (Anthropic's Claude). This is
+a human-directed, AI-assisted build — the architecture, methodology, and decisions are
+mine; Claude did much of the implementation under that direction.
+
 ## License
 
 MIT
