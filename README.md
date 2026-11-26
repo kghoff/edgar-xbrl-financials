@@ -76,6 +76,12 @@ is keyed `[fiscalYear][quarter]`. Field names are snake_case (`revenues`,
   (use an email or another contact URL instead).
 - **Optional caching.** Set `EDGAR_CACHE_DIR=./cache` to persist SEC responses
   to disk between runs.
+- **Fiscal-year labels.** Years are keyed by the SEC's fiscal-year tag, except for
+  companies whose years end in January or February (retailers): those are labelled
+  by the calendar year of the period end, the Morningstar / Rule One convention,
+  whichever way the issuer's own tag runs (Walmart tags the end year, Kroger the
+  start year). When the SEC tags two consecutive 10-Ks alike (it happens: Kroger,
+  Albertsons), both years are kept.
 - **Per-share figures.** With no external split feed, per-share history (EPS,
   dividends-per-share) uses the issuer's own restated comparatives from recent
   filings — split-consistent within the restatement window. Every dollar total

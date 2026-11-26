@@ -268,45 +268,105 @@ export async function fetchCompanyFacts(cik) {
 
 // ─── XBRL Fact Extraction ────────────────────────────────────
 
-// Extract annual values for a given XBRL tag from company facts.
-// Each 10-K includes comparatives (prior years), so we deduplicate
-// by fiscal year (fy), keeping the most recently filed value.
-// Returns { [year]: value } where year = fiscal year from XBRL data.
-// unit: 'USD' (default), 'USD/shares' (EPS, DPS), or 'shares' (share counts)
-export function extractAnnualFact(companyFacts, tag, unit = 'USD') {
-  const facts = companyFacts?.facts?.['us-gaap']?.[tag];
-  if (!facts) return null;
+// ── Fiscal-year labels ───────────────────────────────────────
+// Each 10-K carries the SEC's fiscal-year tag (fy) on its current year AND its prior-year comparatives, so a
+// filing's current year is the entry with the latest period end inside its fy group (fp=FY preferred over Q4;
+// ties on end go to the latest filing, or the earliest with originalFirst).
+// Two SEC quirks are handled here:
+// 1. The SEC sometimes tags two consecutive 10-Ks with the same fy (Kroger's years ending Feb 2025 and Jan 2026
+//    are both fy=2025; Albertsons likewise). Grouping by fy alone silently dropped the earlier year. A filing whose
+//    own current period (its latest end, by accession number) ends before the group's latest end is such a
+//    double-tagged earlier 10-K, and its period becomes a year of its own.
+// 2. For companies whose fiscal years end in January or February, the fy tag is the start year for some (Kroger,
+//    BJ's: fy=2025 ends Jan 2026) and the end year for others (Walmart: fy=2026 ends Jan 2026). Morningstar and
+//    Rule One label such years by the calendar year of the period end, so these companies' years are labelled by
+//    end date (fiscalProfile decides, once per company facts object). Other companies keep the fy tag, which is the
+//    calendar year; a recovered double-tagged year takes tag - (years back) when that label is free.
+const FYE_CANDIDATES = ['Revenues', 'RevenueFromContractWithCustomerExcludingAssessedTax',
+  'Assets', 'NetIncomeLoss', 'SalesRevenueNet'];
+const PROFILES = new WeakMap();
 
-  const entries = facts.units?.[unit] || [];
+function annualEntries(companyFacts, tag, unit = 'USD') {
+  const entries = companyFacts?.facts?.['us-gaap']?.[tag]?.units?.[unit] || [];
   // Include fp=Q4 from 10-K filings as fallback — some companies tag annual
   // data as Q4 instead of FY (e.g., COST FY2019 has 599 Q4 entries, zero FY).
-  const annual = entries.filter(e => e.form === '10-K' && (e.fp === 'FY' || e.fp === 'Q4'));
-  if (annual.length === 0) return null;
+  return entries.filter(e => e.form === '10-K' && (e.fp === 'FY' || e.fp === 'Q4'));
+}
 
-  // Group by fiscal year, keep the entry with the latest period end date.
-  // Each 10-K reports current year + prior year comparative, both with
-  // the same fy. We want the current year (latest end date), not the
-  // comparative. If end dates tie, prefer the most recently filed.
-  // Always prefer fp=FY over fp=Q4 for the same fiscal year.
+function latestEndByTag(annual) {
+  const out = {};
+  for (const e of annual) if (e.fy && e.end && (!out[e.fy] || e.end > out[e.fy])) out[e.fy] = e.end;
+  return out;
+}
+
+// { janFeb, usualGap }: whether this company's years are labelled by end date, and its usual gap between the
+// SEC tag and the end year (0 for Walmart, 1 for Kroger) for years with no 10-K yet.
+export function fiscalProfile(companyFacts) {
+  if (!companyFacts || typeof companyFacts !== 'object') return { janFeb: false, usualGap: 0 };
+  if (PROFILES.has(companyFacts)) return PROFILES.get(companyFacts);
+  let prof = { janFeb: false, usualGap: 0 };
+  for (const tag of FYE_CANDIDATES) {
+    const byTag = latestEndByTag(annualEntries(companyFacts, tag));
+    const tags = Object.keys(byTag).map(Number).sort((a, b) => a - b);
+    if (!tags.length) continue;
+    const month = Number(byTag[tags[0]].slice(5, 7));
+    const counts = {};
+    for (const t of tags) { const g = Number(byTag[t].slice(0, 4)) - t; counts[g] = (counts[g] || 0) + 1; }
+    const usualGap = Number(Object.entries(counts).sort((x, y) => y[1] - x[1])[0][0]);
+    prof = { janFeb: month === 1 || month === 2, usualGap };
+    break;
+  }
+  PROFILES.set(companyFacts, prof);
+  return prof;
+}
+
+// A tag's annual entries -> { [label]: entry } (see above).
+export function annualByLabel(annual, originalFirst = false, profile = { janFeb: false }) {
+  const better = (e, cur) => !cur
+    || (e.fp === 'FY' && cur.fp !== 'FY')
+    || (e.fp === cur.fp && (e.end > cur.end
+      || (e.end === cur.end && (originalFirst ? e.filed < cur.filed : e.filed > cur.filed))));
   const byFY = {};
   for (const e of annual) {
-    const fy = e.fy;
-    if (!fy) continue;
-    const cur = byFY[fy];
-    if (!cur
-      || (e.fp === 'FY' && cur.fp !== 'FY')
-      || (e.fp === cur.fp && (e.end > cur.end || (e.end === cur.end && e.filed > cur.filed)))
-    ) {
-      byFY[fy] = e;
+    if (!e.fy) continue;
+    (byFY[e.fy] ||= []).push(e);
+  }
+  const mains = [], spills = [];
+  for (const [fyStr, es] of Object.entries(byFY)) {
+    const fy = Number(fyStr);
+    let main = null;
+    for (const e of es) if (better(e, main)) main = e;
+    mains.push({ fy, entry: main });
+    const currentEnd = {};                                   // accession -> that filing's own latest end
+    for (const e of es) if (e.accn && (!currentEnd[e.accn] || e.end > currentEnd[e.accn])) currentEnd[e.accn] = e.end;
+    for (const end of new Set(Object.values(currentEnd).filter((x) => x < main.end))) {
+      const yearsBack = Math.round((new Date(main.end) - new Date(end)) / (365.25 * 86400000));
+      if (yearsBack < 1) continue;
+      const own = new Set(Object.keys(currentEnd).filter((a) => currentEnd[a] === end));
+      let pick = null;                                       // that filing's own value first, then any for the period
+      for (const e of es) if (e.end === end && own.has(e.accn) && better(e, pick)) pick = e;
+      for (const e of es) if (e.end === end && !pick) pick = e;
+      spills.push({ fy: fy - yearsBack, entry: pick });
     }
   }
+  const label = (x) => (profile.janFeb && x.entry.end ? Number(x.entry.end.slice(0, 4)) : x.fy);
+  const out = {};
+  for (const x of mains) if (!(label(x) in out)) out[label(x)] = x.entry;
+  for (const x of spills) if (!(label(x) in out)) out[label(x)] = x.entry;
+  return out;
+}
 
-  // Map to { year: value } using fiscal year
+// Extract annual values for a given XBRL tag from company facts.
+// Returns { [year]: value } where year = the SEC fiscal-year tag (annualByLabel above).
+// unit: 'USD' (default), 'USD/shares' (EPS, DPS), or 'shares' (share counts)
+export function extractAnnualFact(companyFacts, tag, unit = 'USD') {
+  const annual = annualEntries(companyFacts, tag, unit);
+  if (annual.length === 0) return null;
+
   const result = {};
-  for (const [fy, entry] of Object.entries(byFY)) {
+  for (const [fy, entry] of Object.entries(annualByLabel(annual, false, fiscalProfile(companyFacts)))) {
     result[Number(fy)] = entry.val;
   }
-
   return result;
 }
 
@@ -316,73 +376,72 @@ export function extractAnnualFact(companyFacts, tag, unit = 'USD') {
 // 2-3 years of comparatives with split-adjusted numbers, which would cause
 // double-adjustment if we applied our own split factors on top.
 export function extractAnnualFactOriginal(companyFacts, tag, unit = 'USD') {
-  const facts = companyFacts?.facts?.['us-gaap']?.[tag];
-  if (!facts) return null;
-
-  const entries = facts.units?.[unit] || [];
-  // Same fp=Q4 fallback as extractAnnualFact (see comment above).
-  const annual = entries.filter(e => e.form === '10-K' && (e.fp === 'FY' || e.fp === 'Q4'));
+  const annual = annualEntries(companyFacts, tag, unit);
   if (annual.length === 0) return null;
 
-  // Group by fiscal year, keep the entry with the latest period end date
-  // but EARLIEST filed date (original filing, not restated comparative).
-  // Always prefer fp=FY over fp=Q4 for the same fiscal year.
-  const byFY = {};
-  for (const e of annual) {
-    const fy = e.fy;
-    if (!fy) continue;
-    const cur = byFY[fy];
-    if (!cur
-      || (e.fp === 'FY' && cur.fp !== 'FY')
-      || (e.fp === cur.fp && (e.end > cur.end || (e.end === cur.end && e.filed < cur.filed)))
-    ) {
-      byFY[fy] = e;
-    }
-  }
-
   const result = {};
-  for (const [fy, entry] of Object.entries(byFY)) {
+  for (const [fy, entry] of Object.entries(annualByLabel(annual, true, fiscalProfile(companyFacts)))) {
     result[Number(fy)] = entry.val;
   }
   return result;
 }
 
-// Extract fiscal year end months from company facts.
-// Returns { [year]: 'Sep' } by looking at a common tag's 10-K end dates.
+// Fiscal year end dates per year label (the labels the statements use), from a common tag's 10-K entries.
 const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
-export function extractFiscalYearEnds(companyFacts) {
-  // Try common tags that virtually every company reports
-  const candidates = ['Revenues', 'RevenueFromContractWithCustomerExcludingAssessedTax',
-    'Assets', 'NetIncomeLoss', 'SalesRevenueNet'];
-  for (const tag of candidates) {
-    const facts = companyFacts?.facts?.['us-gaap']?.[tag];
-    if (!facts) continue;
-    const entries = facts.units?.USD || [];
-    const annual = entries.filter(e => e.form === '10-K' && (e.fp === 'FY' || e.fp === 'Q4') && e.fy && e.end);
+export function extractFiscalYearEndDates(companyFacts) {
+  for (const tag of FYE_CANDIDATES) {
+    const annual = annualEntries(companyFacts, tag).filter(e => e.fy && e.end);
     if (annual.length === 0) continue;
-
-    // Group by fy, keep latest end date (same logic as extractAnnualFact).
-    // Prefer fp=FY over fp=Q4 for the same fiscal year.
-    const byFY = {};
-    for (const e of annual) {
-      const cur = byFY[e.fy];
-      if (!cur
-        || (e.fp === 'FY' && cur.fp !== 'FY')
-        || (e.fp === cur.fp && e.end > cur.end)
-      ) {
-        byFY[e.fy] = e;
-      }
-    }
-
     const result = {};
-    for (const [fy, entry] of Object.entries(byFY)) {
-      const month = parseInt(entry.end.split('-')[1]) - 1; // 0-indexed
-      result[Number(fy)] = MONTH_ABBR[month];
+    for (const [fy, entry] of Object.entries(annualByLabel(annual, false, fiscalProfile(companyFacts)))) {
+      result[Number(fy)] = entry.end;
     }
     return result;
   }
   return {};
+}
+
+// Latest 10-K period end per SEC fy TAG (not per label): what a 10-Q's fy tag refers to.
+export function fiscalYearEndDatesByTag(companyFacts) {
+  for (const tag of FYE_CANDIDATES) {
+    const byTag = latestEndByTag(annualEntries(companyFacts, tag));
+    if (Object.keys(byTag).length) return Object.fromEntries(Object.entries(byTag).map(([k, v]) => [Number(k), v]));
+  }
+  return {};
+}
+
+// Extract fiscal year end months from company facts.
+// Returns { [year]: 'Sep' } by looking at a common tag's 10-K end dates.
+export function extractFiscalYearEnds(companyFacts) {
+  const result = {};
+  for (const [fy, end] of Object.entries(extractFiscalYearEndDates(companyFacts))) {
+    result[Number(fy)] = MONTH_ABBR[parseInt(end.split('-')[1]) - 1];
+  }
+  return result;
+}
+
+// Quarterly data is keyed by the SEC fy TAG of the 10-Qs. For a January / February company, map each tag to the
+// label the annual statements use (the calendar year of the fiscal year's end, from fiscalYearEndDatesByTag); a
+// tag with no 10-K yet takes the company's usual gap between tag and end year. Returns { [tag]: label }.
+export function fiscalYearRelabel(fys, endDates) {
+  const gaps = Object.entries(endDates).map(([fy, end]) => Number(end.slice(0, 4)) - Number(fy));
+  const counts = {};
+  for (const g of gaps) counts[g] = (counts[g] || 0) + 1;
+  const usual = gaps.length ? Number(Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0]) : 1;
+  const map = {};
+  const taken = new Set();
+  const ordered = [...fys].sort((a, b) => (endDates[b] || '') < (endDates[a] || '') ? -1 : 1);
+  for (const fy of ordered) {
+    const label = endDates[fy] ? Number(endDates[fy].slice(0, 4)) : fy + usual;
+    if (taken.has(label)) {
+      console.error(`fiscal-year relabel: fy ${fy} and another year both end in ${label}; fy ${fy} kept as is`);
+      continue;
+    }
+    map[fy] = label;
+    taken.add(label);
+  }
+  return map;
 }
 
 // Find the most recent 10-Q filing quarter from company facts.

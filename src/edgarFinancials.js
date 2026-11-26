@@ -5,7 +5,7 @@
 // Taxonomy covers ~100 line items matching both Rule One Toolbox and Morningstar structures.
 // Each field uses ordered fallback tags — first tag's value wins per year, later tags fill gaps.
 
-import { lookupCIK, fetchCompanyFacts, fetchCompanyInfo, extractAnnualFact, extractAnnualFactOriginal, extractFiscalYearEnds, findLatestQuarter } from './edgar.js';
+import { lookupCIK, fetchCompanyFacts, fetchCompanyInfo, extractAnnualFact, extractAnnualFactOriginal, extractFiscalYearEnds, fiscalYearEndDatesByTag, fiscalYearRelabel, findLatestQuarter } from './edgar.js';
 import { cacheGetAsync, cacheSet } from './cache.js';
 // SEC-only build: no external split history. Per-share figures rely on the
 // issuer's own restated comparatives (see the extraction change below). These
@@ -33,6 +33,9 @@ const INCOME_TAXONOMY = [
     'CostOfRevenue',
     'CostOfGoodsAndServicesSold',
     'CostOfGoodsSold',
+    // Grocers that show D&A as its own line (Kroger): merchandise costs excluding D&A. Last, so it only fills
+    // years the all-in tags leave empty; the provenance tag says which was used.
+    'CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization',
   ]},
   { field: 'gross_profit', unit: 'USD', tags: [
     'GrossProfit',
@@ -215,7 +218,13 @@ const BALANCE_TAXONOMY = [
     'InventoryNet',
     'InventoryFinishedGoodsAndWorkInProcess',
     'InventoryRawMaterialsAndSupplies',
+    'InventoryFinishedGoodsNetOfReserves',      // retailers: Grocery Outlet
+    'RetailRelatedInventoryMerchandise',        // retailers: Natural Grocers
   ]},
+  // LIFO filers that tag only the FIFO amount and the reserve (Kroger): computeDerivedFields nets them into
+  // inventory when InventoryNet is missing, then removes these internal fields.
+  { field: '_inventory_fifo', unit: 'USD', tags: ['FIFOInventoryAmount'] },
+  { field: '_inventory_lifo_reserve', unit: 'USD', tags: ['InventoryLIFOReserve'] },
   { field: 'prepaid_expenses', unit: 'USD', tags: [
     'PrepaidExpenseAndOtherAssetsCurrent',
     'PrepaidExpenseCurrent',
@@ -303,6 +312,7 @@ const BALANCE_TAXONOMY = [
   // ── Current Liabilities ──
   { field: 'accounts_payable', unit: 'USD', tags: [
     'AccountsPayableCurrent',
+    'AccountsPayableTradeCurrent',
   ]},
   // Combined payables + accrued (MS DataID 23166 — "Payables and Accrued Expenses")
   // Previously used as AP fallback, but caused 2-3x overstatement for combined-only filers
@@ -312,6 +322,7 @@ const BALANCE_TAXONOMY = [
   { field: 'accrued_liabilities', unit: 'USD', tags: [
     'AccruedLiabilitiesCurrent',
     'EmployeeRelatedLiabilitiesCurrent',
+    'AccruedSalariesCurrent',
   ]},
   { field: 'short_term_debt', unit: 'USD', tags: [
     'DebtCurrent',
@@ -879,6 +890,7 @@ function getDerivedFormula(field, inc, bal, cf) {
     case 'total_debt_with_leases': return 'total_debt + operating_lease_liabilities';
     case 'net_debt': return 'total_debt - cash';
     case 'payables_and_accrued': return 'accounts_payable + accrued_liabilities';
+    case 'inventory': return 'FIFOInventoryAmount - InventoryLIFOReserve';
     case 'short_term_debt': return 'commercial_paper + short_term_borrowings + notes_payable_current';
     case 'short_term_debt_and_leases': return 'short_term_debt + current_portion_lt_debt + finance_lease_liability_current';
     case 'lt_debt_and_leases_noncurrent': return 'long_term_debt + finance_lease_liability_noncurrent';
@@ -1154,6 +1166,13 @@ function computeDerivedFields(years, income, balance, cashFlow) {
     bal.net_debt = bal.total_debt - (bal.cash ?? 0);
 
     // ── Expanded Balance Sheet Derived ──
+
+    // Inventory for LIFO filers that tag only FIFO inventory and the LIFO reserve (Kroger)
+    if (bal.inventory == null && bal._inventory_fifo != null) {
+      bal.inventory = bal._inventory_fifo - (bal._inventory_lifo_reserve ?? 0);
+    }
+    delete bal._inventory_fifo;
+    delete bal._inventory_lifo_reserve;
 
     // Payables & Accrued Expenses combined
     if (bal.payables_and_accrued == null) {
@@ -1806,7 +1825,7 @@ export async function fetchEdgarQuarterly(ticker, options = {}) {
   if (!facts) return null;
 
   // v2: FY label offset for Jan/Feb companies
-  const cacheKey = `edgar-quarterly:v2:${ticker.toUpperCase()}:s${splits.length}:${version}`;
+  const cacheKey = `edgar-quarterly:v3:${ticker.toUpperCase()}:s${splits.length}:${version}`;
   const cached = await cacheGetAsync(cacheKey);
   if (cached) return cached;
 
@@ -1864,18 +1883,22 @@ export async function fetchEdgarQuarterly(ticker, options = {}) {
       }
     }
   }
-  // ── Fiscal Year Label Offset (quarterly) ──
-  // Same Jan/Feb offset as annual — relabel FY keys to end-date calendar year.
+  // ── Fiscal Year Label (quarterly) ──
+  // Same Jan/Feb rule as annual: relabel FY keys to the end-date calendar year, per year (fiscalYearRelabel);
+  // a year whose 10-K is not filed yet takes the company's usual gap between tag and end year.
   const qFyEndMonth = Object.values(fiscalMonths)[0];
   const qNeedsOffset = qFyEndMonth === 'Jan' || qFyEndMonth === 'Feb';
   if (qNeedsOffset) {
+    const relabel = fiscalYearRelabel(availableFYs, fiscalYearEndDatesByTag(facts));
+    const remapped = {};
     for (const fy of [...availableFYs]) {
-      const newFy = fy + 1;
-      quarterly[newFy] = quarterly[fy]; delete quarterly[fy];
+      remapped[relabel[fy] ?? fy] = quarterly[fy];
     }
-    for (let i = 0; i < availableFYs.length; i++) availableFYs[i] = availableFYs[i] + 1;
+    Object.keys(quarterly).forEach(k => delete quarterly[k]);
+    Object.assign(quarterly, remapped);
+    for (let i = 0; i < availableFYs.length; i++) availableFYs[i] = relabel[availableFYs[i]] ?? availableFYs[i];
     const newFM = {};
-    for (const [k, v] of Object.entries(fiscalMonths)) newFM[Number(k) + 1] = v;
+    for (const [k, v] of Object.entries(fiscalMonths)) newFM[relabel[Number(k)] ?? Number(k)] = v;
     Object.keys(fiscalMonths).forEach(k => delete fiscalMonths[k]);
     Object.assign(fiscalMonths, newFM);
   }
@@ -1947,7 +1970,7 @@ export async function fetchEdgarStatements(ticker, options = {}) {
 
   // Include split count + version + industry type in cache key.
   // v8: FY label offset for Jan/Feb companies, interest expense gate on debt sanity check, normalized opex
-  const cacheKey = `edgar-statements:v9:${ticker.toUpperCase()}:s${splits.length}:${version}:${industryType}`;
+  const cacheKey = `edgar-statements:v10:${ticker.toUpperCase()}:s${splits.length}:${version}:${industryType}`;
   const cached = await cacheGetAsync(cacheKey);
   if (cached) return cached;
 
@@ -2049,38 +2072,9 @@ export async function fetchEdgarStatements(ticker, options = {}) {
   const latestQtr = findLatestQuarter(facts);
   const ttm = computeTTM(facts, latestQtr);
 
-  // ── Fiscal Year Label Offset ──────────────────────────────
-  // Companies with Jan/Feb FY ends: XBRL `fy` is 1 less than the calendar year of
-  // the period end date. R1/MS use end-date calendar year. Re-label to match.
-  // Example: LULU FY ending Feb 2, 2025 → XBRL fy=2024 → relabel to 2025.
-  // Only applies to Jan/Feb — all other non-Dec months have fy = calendar year.
+  // Year labels: assigned at extraction (edgar.js annualByLabel / fiscalProfile). January / February year ends
+  // are labelled by the calendar year of the period end (R1/MS convention); other companies keep the SEC fy tag.
   // The Frames API (edgarFrames.js) is NOT affected — it uses its own XBRL-convention logic.
-  const fyEndMonth = Object.values(fiscalMonths)[0]; // consistent across years
-  const needsYearOffset = fyEndMonth === 'Jan' || fyEndMonth === 'Feb';
-  if (needsYearOffset) {
-    const remapKeys = (obj) => {
-      const remapped = {};
-      for (const [key, val] of Object.entries(obj)) {
-        remapped[Number(key) + 1] = val;
-      }
-      return remapped;
-    };
-    // Remap year keys in all statement and provenance objects
-    for (const yr of years) {
-      const newYr = yr + 1;
-      income[newYr] = income[yr]; delete income[yr];
-      balance[newYr] = balance[yr]; delete balance[yr];
-      cashFlow[newYr] = cashFlow[yr]; delete cashFlow[yr];
-      provIncome[newYr] = provIncome[yr]; delete provIncome[yr];
-      provBalance[newYr] = provBalance[yr]; delete provBalance[yr];
-      provCashFlow[newYr] = provCashFlow[yr]; delete provCashFlow[yr];
-    }
-    // Remap years array and fiscalMonths
-    for (let i = 0; i < years.length; i++) years[i] = years[i] + 1;
-    const newFiscalMonths = remapKeys(fiscalMonths);
-    Object.keys(fiscalMonths).forEach(k => delete fiscalMonths[k]);
-    Object.assign(fiscalMonths, newFiscalMonths);
-  }
 
   const provenance = { income: provIncome, balance: provBalance, cashFlow: provCashFlow };
   const result = { years, income, balance, cashFlow, fiscalMonths, ttm, provenance, industryType };
