@@ -5,7 +5,7 @@
 // Taxonomy covers ~100 line items matching both Rule One Toolbox and Morningstar structures.
 // Each field uses ordered fallback tags — first tag's value wins per year, later tags fill gaps.
 
-import { lookupCIK, fetchCompanyFacts, fetchCompanyInfo, extractAnnualFact, extractAnnualFactOriginal, extractFiscalYearEnds, fiscalYearEndDatesByTag, fiscalYearRelabel, findLatestQuarter } from './edgar.js';
+import { lookupCIK, fetchCompanyFacts, fetchCompanyInfo, extractAnnualFact, extractAnnualFactOriginal, extractFiscalYearEnds, fiscalProfile, labelForPeriod, quarterlyTagLabels, findLatestQuarter } from './edgar.js';
 import { cacheGetAsync, cacheSet } from './cache.js';
 // SEC-only build: no external split history. Per-share figures rely on the
 // issuer's own restated comparatives (see the extraction change below). These
@@ -1884,12 +1884,12 @@ export async function fetchEdgarQuarterly(ticker, options = {}) {
     }
   }
   // ── Fiscal Year Label (quarterly) ──
-  // Same Jan/Feb rule as annual: relabel FY keys to the end-date calendar year, per year (fiscalYearRelabel);
-  // a year whose 10-K is not filed yet takes the company's usual gap between tag and end year.
-  const qFyEndMonth = Object.values(fiscalMonths)[0];
-  const qNeedsOffset = qFyEndMonth === 'Jan' || qFyEndMonth === 'Feb';
-  if (qNeedsOffset) {
-    const relabel = fiscalYearRelabel(availableFYs, fiscalYearEndDatesByTag(facts));
+  // Same Jan/Feb rule as annual: a fiscal year is labelled by the calendar year it ends in. 10-Q tags are the
+  // issuer's own labels, so each tag maps through its own period ends (quarterlyTagLabels), never through the
+  // 10-K tags, which the SEC sometimes assigns inconsistently (Kroger).
+  const qProfile = fiscalProfile(facts);
+  if (qProfile.janFeb) {
+    const relabel = quarterlyTagLabels(facts, qProfile);
     const remapped = {};
     for (const fy of [...availableFYs]) {
       remapped[relabel[fy] ?? fy] = quarterly[fy];
@@ -2071,6 +2071,10 @@ export async function fetchEdgarStatements(ticker, options = {}) {
   // Compute TTM from latest quarterly filing
   const latestQtr = findLatestQuarter(facts);
   const ttm = computeTTM(facts, latestQtr);
+  if (ttm && latestQtr) {   // the TTM quarter's label follows the same year-label rule as the statements
+    const prof = fiscalProfile(facts);
+    if (prof.janFeb) ttm.quarter = `${latestQtr.fp} FY${labelForPeriod(latestQtr.end, latestQtr.fp, prof)}`;
+  }
 
   // Year labels: assigned at extraction (edgar.js annualByLabel / fiscalProfile). January / February year ends
   // are labelled by the calendar year of the period end (R1/MS convention); other companies keep the SEC fy tag.

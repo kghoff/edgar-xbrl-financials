@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { annualByLabel, extractAnnualFact, fiscalProfile, fiscalYearRelabel } from '../../src/edgar.js';
+import { annualByLabel, extractAnnualFact, fiscalProfile, labelForPeriod, quarterlyTagLabels } from '../../src/edgar.js';
 
 const e = (fy, start, end, val, accn, filed, fp = 'FY') => ({ fy, fp, form: '10-K', start, end, val, accn, filed });
 
@@ -19,7 +19,7 @@ describe('fiscal-year labels', () => {
     expect(got[2025].val).toBe(147.1);                                           // the filing's own value, not the restatement
     expect(got[2024].val).toBe(150.0);
     const facts = { facts: { 'us-gaap': { Revenues: { units: { USD: entries } } } } };
-    expect(fiscalProfile(facts)).toEqual({ janFeb: true, usualGap: 1 });
+    expect(fiscalProfile(facts)).toEqual({ janFeb: true, usualGap: 1, fyeMonth: 1 });
     expect(extractAnnualFact(facts, 'Revenues')).toEqual({ 2023: 148.3, 2024: 150.0, 2025: 147.1, 2026: 147.6 });
   });
 
@@ -30,7 +30,7 @@ describe('fiscal-year labels', () => {
       e(2025, '2024-01-01', '2024-12-31', 10.5, 'B', '2026-02-20'),             // restated comparative
     ];
     const facts = { facts: { 'us-gaap': { Revenues: { units: { USD: entries } } } } };
-    expect(fiscalProfile(facts)).toEqual({ janFeb: false, usualGap: 0 });
+    expect(fiscalProfile(facts)).toEqual({ janFeb: false, usualGap: 0, fyeMonth: 12 });
     expect(extractAnnualFact(facts, 'Revenues')).toEqual({ 2024: 10, 2025: 12 });
   });
 
@@ -45,13 +45,17 @@ describe('fiscal-year labels', () => {
     expect(annualByLabel(entries)[2024].val).toBe(12);
   });
 
-  it('maps 10-Q fy tags to end-date labels, whichever way the SEC tag runs', () => {
-    // Walmart tags the end year already: fy 2026 ends Jan 2026 -> 2026 (the old fixed +1 made it 2027)
-    expect(fiscalYearRelabel([2025, 2026], { 2025: '2025-01-31', 2026: '2026-01-31' })).toEqual({ 2025: 2025, 2026: 2026 });
-    // Kroger / BJ's tag the start year: fy 2025 ends Jan 2026 -> 2026
-    expect(fiscalYearRelabel([2024, 2025], { 2024: '2025-02-01', 2025: '2026-01-31' })).toEqual({ 2024: 2025, 2025: 2026 });
-    // a year with no 10-K yet (quarterly) follows the company's usual gap
-    expect(fiscalYearRelabel([2025, 2026], { 2025: '2026-01-31' })).toEqual({ 2025: 2026, 2026: 2027 });
-    expect(fiscalYearRelabel([2026, 2027], { 2026: '2026-01-31' })).toEqual({ 2026: 2026, 2027: 2027 });
+  it('maps 10-Q fy tags to end-date labels from their own period ends, whichever way the tag runs', () => {
+    const prof = { janFeb: true, usualGap: 1, fyeMonth: 1 };
+    const q = (fy, fp, end) => ({ fy, fp, form: '10-Q', end, val: 1 });
+    // Kroger tags fiscal 2026 (ends Jan 2027) as 2026 on its 10-Qs -> label 2027; Walmart tags the same period 2027
+    const kr = { facts: { 'us-gaap': { Revenues: { units: { USD: [q(2025, 'Q3', '2025-11-08'), q(2026, 'Q1', '2026-05-23'),
+                                                                     q(2026, 'Q2', '2026-08-15')] } } } } };
+    expect(quarterlyTagLabels(kr, prof)).toEqual({ 2025: 2026, 2026: 2027 });
+    const wmt = { facts: { 'us-gaap': { Revenues: { units: { USD: [q(2027, 'Q2', '2026-07-31')] } } } } };
+    expect(quarterlyTagLabels(wmt, prof)).toEqual({ 2027: 2027 });
+    expect(quarterlyTagLabels(wmt, { janFeb: false })).toEqual({});                 // other companies keep the tag
+    expect(labelForPeriod('2026-01-31', 'FY', prof)).toBe(2026);                      // a 10-K ends at the year end
+    expect(labelForPeriod('2026-08-15', 'Q2', prof)).toBe(2027);
   });
 });
